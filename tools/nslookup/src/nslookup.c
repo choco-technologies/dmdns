@@ -79,59 +79,53 @@ static void print_usage(const char* prog)
     Dmod_Printf("[server] must be an IP address literal.\n");
 }
 
+static void print_address_line(const char* label, const dmip_addr_t* addr)
+{
+    char* text = dmdns_address_to_string(addr);
+    if (text != NULL)
+    {
+        Dmod_Printf("%s %s\n", label, text);
+        Dmod_Free(text);
+    }
+}
+
 static void print_server(const options_t* options)
 {
-    char text[DMDNS_ADDRESS_STRLEN];
-    dmip_addr_t servers[DMDNS_MAX_SERVERS];
+    dmip_addr_t* servers = NULL;
+    size_t count = 0;
 
     if (options->server_text != NULL)
-    {
         Dmod_Printf("Server:  %s\n", options->server_text);
-    }
-    else if (dmdns_get_servers(servers, DMDNS_MAX_SERVERS) > 0u && dmdns_format_address(&servers[0], text, sizeof(text)) == 0)
-    {
-        Dmod_Printf("Server:  %s\n", text);
-    }
+    else if (dmdns_get_servers(&servers, &count) == 0 && count > 0u)
+        print_address_line("Server: ", &servers[0]);
     else
-    {
         Dmod_Printf("Server:  (none configured)\n");
-    }
+
+    Dmod_Free(servers);
     Dmod_Printf("\n");
 }
 
-static void print_addresses(const dmip_addr_t* addrs, int count)
-{
-    char text[DMDNS_ADDRESS_STRLEN];
-    for (int i = 0; i < count; i++)
-    {
-        if (dmdns_format_address(&addrs[i], text, sizeof(text)) == 0)
-            Dmod_Printf("Address: %s\n", text);
-    }
-}
-
 /* One family: through the resolver, or straight to the given server. */
-static int lookup_family(const options_t* options, dmip_family_t family, dmip_addr_t* out, size_t max)
+static int lookup_family(const options_t* options, dmip_family_t family, dmip_addr_t** out_addrs, size_t* out_count)
 {
-    if (options->server_text == NULL)
-        return dmdns_resolve(options->name, family, out, max, options->timeout_ms);
-
     dmip_addr_t literal;
-    if (dmdns_parse_address(options->name, &literal) == 0)
-        return dmdns_resolve(options->name, family, out, max, options->timeout_ms);
+    if (options->server_text == NULL || dmdns_parse_address(options->name, &literal) == 0)
+        return dmdns_resolve(options->name, family, out_addrs, out_count, options->timeout_ms);
 
     uint16_t qtype = (family == dmip_family_v4) ? DMDNS_TYPE_A : DMDNS_TYPE_AAAA;
-    return dmdns_query(&options->server, options->name, qtype, out, max, NULL, options->timeout_ms);
+    return dmdns_query(&options->server, options->name, qtype, out_addrs, out_count, NULL, options->timeout_ms);
 }
 
 static int lookup_and_print(const options_t* options, dmip_family_t family, size_t* found)
 {
-    dmip_addr_t addrs[DMDNS_MAX_ADDRESSES];
-    int result = lookup_family(options, family, addrs, DMDNS_MAX_ADDRESSES);
-    if (result > 0)
-    {
-        print_addresses(addrs, result);
-        *found += (size_t)result;
-    }
+    dmip_addr_t* addrs = NULL;
+    size_t count = 0;
+    int result = lookup_family(options, family, &addrs, &count);
+    for (size_t i = 0; result == 0 && i < count; i++)
+        print_address_line("Address:", &addrs[i]);
+
+    *found += (result == 0) ? count : 0u;
+    Dmod_Free(addrs);
     return result;
 }
 

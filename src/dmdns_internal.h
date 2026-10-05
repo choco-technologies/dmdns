@@ -22,6 +22,19 @@
 /** @brief Equality of two addresses (same family and same bytes) */
 bool dmdns_addr_equal(const dmip_addr_t* a, const dmip_addr_t* b);
 
+/**
+ * @brief Grow a Dmod_Malloc'd address array by one entry (Dmod_Realloc)
+ *
+ * `*list` may be NULL with `*count` 0 to start a new array. On failure the
+ * array is left untouched (still owned by the caller).
+ *
+ * @return 0, or -ENOMEM
+ */
+int dmdns_addr_append(dmip_addr_t** list, size_t* count, const dmip_addr_t* addr);
+
+/** @brief Copy `count` addresses into a new array of exactly that size. Returns NULL on allocation failure. */
+dmip_addr_t* dmdns_addr_copy(const dmip_addr_t* addrs, size_t count);
+
 /** @brief Case-insensitive equality of two host names, ignoring one trailing dot on either */
 bool dmdns_name_equal(const char* a, const char* b);
 
@@ -41,25 +54,27 @@ void dmdns_query_deinit(void);
 /**
  * @brief Look `name` up in "localhost" and the hosts table
  *
- * @return Number of addresses of `qtype` written to `out` (0 if none)
+ * @return 0 with `*out_addrs` (Dmod_Malloc'd, `*out_count` entries) set,
+ *         -ENOENT if there is no entry of `qtype`, or -ENOMEM
  */
-size_t dmdns_hosts_lookup(const char* name, uint16_t qtype, dmip_addr_t* out, size_t max);
+int dmdns_hosts_lookup(const char* name, uint16_t qtype, dmip_addr_t** out_addrs, size_t* out_count);
 
 /**
  * @brief Look a cached answer up
  *
- * @return > 0 number of cached addresses written to `out`, a negative
- *         errno for a cached negative answer (-ENOENT/-ENODATA), or 0 if
- *         nothing (still valid) is cached for this name and type
+ * @return 1 with `*out_addrs` (Dmod_Malloc'd copy, `*out_count` entries)
+ *         set for a cached positive answer, a negative errno for a cached
+ *         negative answer (-ENOENT/-ENODATA) or an allocation failure
+ *         (-ENOMEM), or 0 if nothing (still valid) is cached
  */
-int dmdns_cache_lookup(const char* name, uint16_t qtype, dmip_addr_t* out, size_t max);
+int dmdns_cache_lookup(const char* name, uint16_t qtype, dmip_addr_t** out_addrs, size_t* out_count);
 
 /**
  * @brief Remember an answer for `ttl_sec` seconds
  *
- * @param result > 0 for `count` addresses in `addrs`, or a negative errno
- *               (-ENOENT/-ENODATA) for a negative answer
+ * @param result 0 for `count` addresses in `addrs` (copied), or a negative
+ *               errno (-ENOENT/-ENODATA) for a negative answer
  */
-void dmdns_cache_store(const char* name, uint16_t qtype, int result, const dmip_addr_t* addrs, uint32_t ttl_sec);
+void dmdns_cache_store(const char* name, uint16_t qtype, int result, const dmip_addr_t* addrs, size_t count, uint32_t ttl_sec);
 
 #endif // DMDNS_INTERNAL_H

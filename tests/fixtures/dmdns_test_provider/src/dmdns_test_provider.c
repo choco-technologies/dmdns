@@ -8,36 +8,44 @@
 #include "dmdns_test_provider.h"
 #include <string.h>
 
-static dmip_addr_t g_servers[DMDNS_TEST_PROVIDER_MAX_SERVERS];
-static size_t      g_server_count = 0;
+static dmip_addr_t* g_servers = NULL;
+static size_t       g_server_count = 0;
+
+static void clear_servers(void)
+{
+    Dmod_Free(g_servers);
+    g_servers = NULL;
+    g_server_count = 0;
+}
 
 dmod_dmdns_test_provider_api_declaration(1.0, void, _set, ( const dmip_addr_t* servers, size_t count ))
 {
-    if (servers == NULL)
-        count = 0;
-    if (count > DMDNS_TEST_PROVIDER_MAX_SERVERS)
-        count = DMDNS_TEST_PROVIDER_MAX_SERVERS;
-    if (count > 0)
-        memcpy(g_servers, servers, count * sizeof(dmip_addr_t));
+    clear_servers();
+    if (servers == NULL || count == 0)
+        return;
+
+    g_servers = Dmod_Malloc(count * sizeof(dmip_addr_t));
+    if (g_servers == NULL)
+        return;
+    memcpy(g_servers, servers, count * sizeof(dmip_addr_t));
     g_server_count = count;
 }
 
-dmod_dmdns_dif_api_declaration(1.0, dmdns_test_provider, size_t, _provide_servers, ( dmip_addr_t* out_servers, size_t max_servers ))
+dmod_dmdns_dif_api_declaration(1.0, dmdns_test_provider, void, _provide_servers, ( dmdns_server_sink_t add, void* sink_ctx ))
 {
-    size_t count = (g_server_count < max_servers) ? g_server_count : max_servers;
-    memcpy(out_servers, g_servers, count * sizeof(dmip_addr_t));
-    return count;
+    for (size_t i = 0; i < g_server_count; i++)
+        add(sink_ctx, &g_servers[i]);
 }
 
 int dmod_init(const Dmod_Config_t *Config)
 {
     (void)Config;
-    g_server_count = 0;
+    clear_servers();
     return 0;
 }
 
 int dmod_deinit(void)
 {
-    g_server_count = 0;
+    clear_servers();
     return 0;
 }

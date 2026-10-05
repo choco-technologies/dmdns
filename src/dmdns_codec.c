@@ -44,10 +44,11 @@ typedef struct
     uint16_t ancount;
 } response_header_t;
 
+/* With out == NULL the walk only counts matching records, so the result
+ * array can be allocated at exactly the right size before the second walk. */
 typedef struct
 {
     dmip_addr_t* out;
-    size_t       max;
     size_t       count;
     uint32_t     min_ttl;
 } answer_set_t;
@@ -158,12 +159,23 @@ static int encode_name(uint8_t* buffer, size_t buffer_len, size_t pos, const cha
     return 0;
 }
 
-dmod_dmdns_api_declaration(1.0, int, _build_query, ( uint8_t* buffer, size_t buffer_len, uint16_t id, const char* name, uint16_t qtype, size_t* out_len ))
+/* Wire size of a query for a (validated) name: header, labels (one length
+ * octet per label replaces each dot, plus the first one and the root
+ * label), QTYPE, QCLASS. */
+static size_t query_length(const char* name)
 {
-    if (buffer == NULL || out_len == NULL || !dmdns_is_valid_name(name))
+    return DMDNS_HEADER_LEN + name_length(name) + 2u + 4u;
+}
+
+dmod_dmdns_api_declaration(1.0, int, _build_query, ( uint16_t id, const char* name, uint16_t qtype, uint8_t** out_message, size_t* out_len ))
+{
+    if (out_message == NULL || out_len == NULL || !dmdns_is_valid_name(name))
         return -EINVAL;
-    if (buffer_len < DMDNS_HEADER_LEN)
-        return -ENOBUFS;
+
+    size_t length = query_length(name);
+    uint8_t* buffer = Dmod_Malloc(length);
+    if (buffer == NULL)
+        return -ENOMEM;
 
     memset(buffer, 0, DMDNS_HEADER_LEN);
     write_u16_be(&buffer[0], id);
@@ -171,15 +183,16 @@ dmod_dmdns_api_declaration(1.0, int, _build_query, ( uint8_t* buffer, size_t buf
     write_u16_be(&buffer[4], 1u); /* QDCOUNT - ANCOUNT/NSCOUNT/ARCOUNT stay 0 */
 
     size_t pos = 0;
-    int result = encode_name(buffer, buffer_len, DMDNS_HEADER_LEN, name, &pos);
-    if (result != 0)
-        return result;
-    if (pos + 4u > buffer_len)
-        return -ENOBUFS;
-
+    if (encode_name(buffer, length, DMDNS_HEADER_LEN, name, &pos) != 0 || pos + 4u != length)
+    {
+        Dmod_Free(buffer); /* cannot happen for a validated name - length is exact */
+        return -EINVAL;
+    }
     write_u16_be(&buffer[pos], qtype);
     write_u16_be(&buffer[pos + 2u], DMDNS_CLASS_IN);
-    *out_len = pos + 4u;
+
+    *out_message = buffer;
+    *out_len = length;
     return 0;
 }
 
@@ -321,8 +334,16 @@ static size_t qtype_address_len(uint16_t qtype)
 
 static void add_answer(answer_set_t* set, uint16_t qtype, const uint8_t* rdata, uint32_t ttl)
 {
-    if (set->count >= set->max)
+    /* RFC 2181 8: a TTL with the top bit set is treated as zero */
+    ttl = (ttl & 0x80000000u) ? 0u : ttl;
+    if (ttl < set->min_ttl)
+        set->min_ttl = ttl;
+
+    if (set->out == NULL)
+    {
+        set->count++;
         return;
+    }
 
     dmip_addr_t* addr = &set->out[set->count++];
     memset(addr, 0, sizeof(*addr));
@@ -336,11 +357,6 @@ static void add_answer(answer_set_t* set, uint16_t qtype, const uint8_t* rdata, 
         addr->family = dmip_family_v6;
         memcpy(addr->addr.v6, rdata, DMIP_IPV6_ADDR_LEN);
     }
-
-    /* RFC 2181 8: a TTL with the top bit set is treated as zero */
-    ttl = (ttl & 0x80000000u) ? 0u : ttl;
-    if (ttl < set->min_ttl)
-        set->min_ttl = ttl;
 }
 
 /* Walk the answer section, keep every IN record of `qtype` (CNAMEs and others are skipped). */
@@ -371,12 +387,35 @@ static int collect_answers(const uint8_t* msg, size_t len, size_t pos, uint16_t 
     return 0;
 }
 
-dmod_dmdns_api_declaration(1.0, int, _parse_response, ( const uint8_t* message, size_t length, uint16_t id, const char* name, uint16_t qtype,
-    dmip_addr_t* out, size_t max, size_t* out_count, uint32_t* out_ttl_sec ))
+/* Two walks over the answer section: count, allocate exactly, fill. */
+static int extract_answers(const uint8_t* msg, size_t len, size_t pos, uint16_t ancount, uint16_t qtype,
+    dmip_addr_t** out_addrs, size_t* out_count, uint32_t* out_min_ttl)
 {
-    if (message == NULL || name == NULL || out_count == NULL || (out == NULL && max > 0u))
+    answer_set_t set = { NULL, 0, UINT32_MAX };
+    int result = collect_answers(msg, len, pos, ancount, qtype, &set);
+    if (result != 0 || set.count == 0u)
+        return result;
+
+    size_t count = set.count;
+    set.out = Dmod_Malloc(count * sizeof(dmip_addr_t));
+    if (set.out == NULL)
+        return -ENOMEM;
+    set.count = 0;
+    collect_answers(msg, len, pos, ancount, qtype, &set);
+
+    *out_addrs = set.out;
+    *out_count = count;
+    *out_min_ttl = set.min_ttl;
+    return 0;
+}
+
+dmod_dmdns_api_declaration(1.0, int, _parse_response, ( const uint8_t* message, size_t length, uint16_t id, const char* name, uint16_t qtype,
+    dmip_addr_t** out_addrs, size_t* out_count, uint32_t* out_ttl_sec ))
+{
+    if (message == NULL || name == NULL || out_addrs == NULL || out_count == NULL)
         return -EINVAL;
 
+    *out_addrs = NULL;
     *out_count = 0;
     if (out_ttl_sec != NULL)
         *out_ttl_sec = DMDNS_NEGATIVE_TTL_SEC;
@@ -391,15 +430,14 @@ dmod_dmdns_api_declaration(1.0, int, _parse_response, ( const uint8_t* message, 
     if ((header.flags & RCODE_MASK) != RCODE_NOERROR)
         return rcode_to_errno(header.flags & RCODE_MASK);
 
-    answer_set_t set = { out, max, 0, UINT32_MAX };
-    result = collect_answers(message, length, pos, header.ancount, qtype, &set);
+    uint32_t min_ttl = 0;
+    result = extract_answers(message, length, pos, header.ancount, qtype, out_addrs, out_count, &min_ttl);
     if (result != 0)
         return result;
-    if (set.count == 0u)
+    if (*out_count == 0u)
         return (header.flags & FLAG_TC) ? -EMSGSIZE : -ENODATA;
 
-    *out_count = set.count;
     if (out_ttl_sec != NULL)
-        *out_ttl_sec = set.min_ttl;
+        *out_ttl_sec = min_ttl;
     return 0;
 }

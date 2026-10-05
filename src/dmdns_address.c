@@ -16,12 +16,12 @@
 #define IPV6_GROUPS      8u
 #define IPV6_GROUP_HEX   4u
 
+/* Text writer: with buffer == NULL it only counts, so the exact length is
+ * known before anything is allocated. */
 typedef struct
 {
     char*  buffer;
-    size_t capacity;
     size_t length;
-    bool   overflow;
 } text_t;
 
 bool dmdns_addr_equal(const dmip_addr_t* a, const dmip_addr_t* b)
@@ -33,6 +33,25 @@ bool dmdns_addr_equal(const dmip_addr_t* a, const dmip_addr_t* b)
     if (a->family == dmip_family_v6)
         return memcmp(a->addr.v6, b->addr.v6, DMIP_IPV6_ADDR_LEN) == 0;
     return true;
+}
+
+int dmdns_addr_append(dmip_addr_t** list, size_t* count, const dmip_addr_t* addr)
+{
+    dmip_addr_t* grown = Dmod_Realloc(*list, (*count + 1u) * sizeof(dmip_addr_t));
+    if (grown == NULL)
+        return -ENOMEM;
+
+    grown[(*count)++] = *addr;
+    *list = grown;
+    return 0;
+}
+
+dmip_addr_t* dmdns_addr_copy(const dmip_addr_t* addrs, size_t count)
+{
+    dmip_addr_t* copy = Dmod_Malloc(count * sizeof(dmip_addr_t));
+    if (copy != NULL)
+        memcpy(copy, addrs, count * sizeof(dmip_addr_t));
+    return copy;
 }
 
 /* ============================================================================
@@ -163,10 +182,9 @@ dmod_dmdns_api_declaration(1.0, int, _parse_address, ( const char* text, dmip_ad
 
 static void put_char(text_t* text, char c)
 {
-    if (text->length + 1u < text->capacity)
-        text->buffer[text->length++] = c;
-    else
-        text->overflow = true;
+    if (text->buffer != NULL)
+        text->buffer[text->length] = c;
+    text->length++;
 }
 
 static void put_number(text_t* text, uint32_t value, uint32_t base)
@@ -237,19 +255,26 @@ static void format_ipv6(text_t* text, const uint8_t* v6)
     }
 }
 
-dmod_dmdns_api_declaration(1.0, int, _format_address, ( const dmip_addr_t* addr, char* buffer, size_t buffer_len ))
+static void format_into(text_t* text, const dmip_addr_t* addr)
 {
-    if (addr == NULL || buffer == NULL || buffer_len == 0u)
-        return -EINVAL;
-
-    text_t text = { buffer, buffer_len, 0, false };
     if (addr->family == dmip_family_v4)
-        format_ipv4(&text, addr->addr.v4);
-    else if (addr->family == dmip_family_v6)
-        format_ipv6(&text, addr->addr.v6);
+        format_ipv4(text, addr->addr.v4);
     else
-        return -EINVAL;
+        format_ipv6(text, addr->addr.v6);
+}
 
-    buffer[text.length] = '\0';
-    return text.overflow ? -ENOBUFS : 0;
+dmod_dmdns_api_declaration(1.0, char*, _address_to_string, ( const dmip_addr_t* addr ))
+{
+    if (addr == NULL || (addr->family != dmip_family_v4 && addr->family != dmip_family_v6))
+        return NULL;
+
+    text_t measure = { NULL, 0 };
+    format_into(&measure, addr);
+
+    text_t text = { Dmod_Malloc(measure.length + 1u), 0 };
+    if (text.buffer == NULL)
+        return NULL;
+    format_into(&text, addr);
+    text.buffer[text.length] = '\0';
+    return text.buffer;
 }

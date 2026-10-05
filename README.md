@@ -101,19 +101,25 @@ dmip_addr_t server;
 dmdns_parse_address("8.8.8.8", &server);
 dmdns_add_server(&server);
 
-dmip_addr_t addrs[4];
-int count = dmdns_resolve("google.com", dmip_family_none, addrs, 4, 0);
-if (count > 0)
+dmip_addr_t* addrs = NULL;     /* allocated by dmdns at exactly the right size */
+size_t count = 0;
+int result = dmdns_resolve("google.com", dmip_family_none, &addrs, &count, 0);
+if (result == 0)
 {
-    char text[DMDNS_ADDRESS_STRLEN];
-    dmdns_format_address(&addrs[0], text, sizeof(text));
-    Dmod_Printf("google.com -> %s\n", text);
+    char* text = dmdns_address_to_string(&addrs[0]);
+    Dmod_Printf("google.com -> %s (%u addresses)\n", text, (unsigned)count);
+    Dmod_Free(text);
+    Dmod_Free(addrs);
 }
 else
 {
-    Dmod_Printf("lookup failed: %d\n", count);   /* -ENOENT, -ETIMEDOUT, ... */
+    Dmod_Printf("lookup failed: %d\n", result);   /* -ENOENT, -ETIMEDOUT, ... */
 }
 ```
+
+Nothing is reserved up front: messages, address lists, server lists and
+strings are allocated with `Dmod_Malloc()` at exactly the size they need,
+and returned results are released by the caller with `Dmod_Free()`.
 
 `dmdns_resolve()`/`dmdns_query()` block until an answer or a timeout -
 never call them from a network receive callback.
@@ -141,7 +147,7 @@ Address: 2a00:1450:401b:80e::200e
 | `dmdns_add_host()` / `_remove_host()` | Static hosts table. |
 | `dmdns_flush_cache()` | Drop cached answers. |
 | `dmdns_build_query()` / `_parse_response()` / `_is_valid_name()` | Wire codec. |
-| `dmdns_parse_address()` / `_format_address()` | IPv4/IPv6 literals. |
+| `dmdns_parse_address()` / `_address_to_string()` | IPv4/IPv6 literals. |
 
 See [include/dmdns.h](include/dmdns.h) for the full
 declarations and [docs/api-reference.md](docs/api-reference.md) for the

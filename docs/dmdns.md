@@ -44,12 +44,33 @@ own:
 | Layer    | Functions | State | Network |
 |----------|-----------|-------|---------|
 | Codec    | `dmdns_is_valid_name()`, `_build_query()`, `_parse_response()` | none | no |
-| Literals | `dmdns_parse_address()`, `_format_address()` | none | no |
+| Literals | `dmdns_parse_address()`, `_address_to_string()` | none | no |
 | Servers  | `dmdns_add_server()`, `_remove_server()`, `_clear_servers()`, `_get_servers()`, DIF `dmdns_provide_servers` | static list | no |
 | Hosts    | `dmdns_add_host()`, `_remove_host()` | table | no |
 | Cache    | `dmdns_flush_cache()` (+ internal lookup/store) | table | no |
 | Query    | `dmdns_query()` | pending-query table | yes |
 | Resolver | `dmdns_resolve()` | - | via Query |
+
+## Memory: allocate what is needed, when it is known
+
+Nothing in dmdns is sized "just in case". Every message, address list,
+server list and string is allocated with `Dmod_Malloc()` at exactly its
+size once that size is known - no buffer is derived from a protocol
+maximum (253-byte names, 512-byte UDP messages) and no thread's stack has
+to grow to hold one:
+
+- `dmdns_build_query()` computes the wire length of the name first and
+  allocates exactly that;
+- `dmdns_parse_response()` walks the answer section twice - count, then
+  fill an array of exactly that many addresses;
+- a received reply is copied at its real length;
+- `dmdns_get_servers()`, the hosts table lookup and the server merge grow
+  their result array one entry at a time (`Dmod_Realloc()`);
+- `dmdns_address_to_string()` measures the text, then allocates it.
+
+Returned results belong to the caller, who releases them with
+`Dmod_Free()`. Bounds that remain - `DMDNS_MAX_NAME_LEN`,
+`DMDNS_CACHE_MAX_ENTRIES` - are policy/validation limits, not buffers.
 
 `dmdns_query()` is public on purpose: it asks *one* server *one* question,
 bypassing hosts table and cache - exactly what `nslookup <name> <server>`
@@ -71,8 +92,12 @@ So `dmdns_get_servers()` merges, on every call:
 2. **Every loaded module implementing the `dmdns_provide_servers` DIF.**
 
 ```c
-dmod_dmdns_dif(1.0, size_t, _provide_servers, ( dmip_addr_t* out_servers, size_t max_servers ));
+typedef int (*dmdns_server_sink_t)( void* sink_ctx, const dmip_addr_t* server );
+dmod_dmdns_dif(1.0, void, _provide_servers, ( dmdns_server_sink_t add, void* sink_ctx ));
 ```
+
+A provider calls `add` once per server it knows - there is no
+caller-sized array to fill and no limit on how many it reports.
 
 The DIF is the 1:N "many interchangeable backends discovered at runtime"
 mechanism of DMOD, used exactly the way dmip uses it for protocol handlers:
@@ -93,13 +118,12 @@ registered or cached. Consequences:
 A provider in dmdhcp is a few lines (sketch, not part of this module):
 
 ```c
-dmod_dmdns_dif_api_declaration(1.0, dmdhcp, size_t, _provide_servers, ( dmip_addr_t* out, size_t max ))
+dmod_dmdns_dif_api_declaration(1.0, dmdhcp, void, _provide_servers, ( dmdns_server_sink_t add, void* sink_ctx ))
 {
-    size_t count = 0;
-    /* for every lease in BOUND/RENEWING/REBINDING:                        */
-    /*     for i < dmdhcp_get_dns_server_count(lease) && count < max:      */
-    /*         dmdhcp_get_dns_server(lease, i, &out[count++]);             */
-    return count;
+    /* for every lease in BOUND/RENEWING/REBINDING:                   */
+    /*     for i < dmdhcp_get_dns_server_count(lease):                */
+    /*         dmdhcp_get_dns_server(lease, i, &server);              */
+    /*         add(sink_ctx, &server);                                */
 }
 ```
 
@@ -115,8 +139,8 @@ header. dmdns' own tests use exactly this shape through the
    from the tick counter) and a semaphore,
 2. binds an ephemeral UDP port for it (`dmudp_bind_any()`) and publishes it
    in the pending table keyed by that port,
-3. builds the question (`dmdns_build_query()`, RD set) and sends it
-   (`dmudp_send()`),
+3. builds the question (`dmdns_build_query()`, RD set, allocated at its
+   exact length) and sends it (`dmudp_send()`),
 4. waits on the semaphore for at most `timeout_ms`,
 5. unpublishes the query, unbinds the port, and parses whatever arrived.
 
@@ -161,7 +185,7 @@ from "this server is broken":
 
 | Answer | Result | Resolver |
 |--------|--------|----------|
-| addresses | count > 0 | done, cached for min TTL |
+| addresses | 0 + address array | done, cached for min TTL |
 | NXDOMAIN | `-ENOENT` | done, cached for `DMDNS_NEGATIVE_TTL_SEC` |
 | NOERROR, no record of the type | `-ENODATA` | done, cached; `dmip_family_none` falls back to AAAA |
 | SERVFAIL | `-EAGAIN` | next server |
@@ -182,7 +206,9 @@ Expiry is checked lazily on lookup - no timer. Transient failures
 
 ## Limits
 
-- **UDP only, 512-byte messages.** No TCP fallback and no EDNS0. A
+- **UDP only.** No TCP fallback and no EDNS0, so servers answer with at
+  most 512 bytes (RFC 1035) - that is the server's limit, dmdns reserves
+  nothing for it. A
   truncated answer is still used when it carries an address, which is
   practically always the case for A/AAAA lookups.
 - **IPv4 transport.** AAAA records are looked up and IPv6 addresses parse

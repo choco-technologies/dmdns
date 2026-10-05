@@ -24,8 +24,9 @@ typedef struct
 {
     char*        name;
     uint16_t     qtype;
-    int          result;      /* > 0: number of addrs, < 0: cached negative errno */
+    int          result;      /* 0: positive answer in addrs/count, < 0: cached negative errno */
     dmip_addr_t* addrs;
+    size_t       count;
     uint32_t     expires_at;  /* dmosi tick */
 } cache_entry_t;
 
@@ -95,44 +96,51 @@ dmod_dmdns_api_declaration(1.0, void, _flush_cache, ( void ))
     dmosi_mutex_unlock(g_cache_mutex);
 }
 
-int dmdns_cache_lookup(const char* name, uint16_t qtype, dmip_addr_t* out, size_t max)
+/* Caller holds g_cache_mutex. 1 + a copy for a positive entry, its errno for a negative one. */
+static int copy_out(const cache_entry_t* entry, dmip_addr_t** out_addrs, size_t* out_count)
+{
+    if (entry->result < 0)
+        return entry->result;
+
+    *out_addrs = dmdns_addr_copy(entry->addrs, entry->count);
+    if (*out_addrs == NULL)
+        return -ENOMEM;
+    *out_count = entry->count;
+    return 1;
+}
+
+int dmdns_cache_lookup(const char* name, uint16_t qtype, dmip_addr_t** out_addrs, size_t* out_count)
 {
     int result = 0;
+    *out_addrs = NULL;
+    *out_count = 0;
+
     dmosi_mutex_lock(g_cache_mutex);
     int index = find_entry(name, qtype);
     if (index >= 0)
     {
         cache_entry_t* entry = dmlist_get(g_cache, (size_t)index);
         if (is_expired(entry, dmosi_get_tick_count()))
-        {
             remove_at((size_t)index);
-        }
-        else if (entry->result < 0)
-        {
-            result = entry->result;
-        }
         else
-        {
-            size_t count = ((size_t)entry->result < max) ? (size_t)entry->result : max;
-            memcpy(out, entry->addrs, count * sizeof(dmip_addr_t));
-            result = (int)count;
-        }
+            result = copy_out(entry, out_addrs, out_count);
     }
     dmosi_mutex_unlock(g_cache_mutex);
     return result;
 }
 
-static cache_entry_t* create_entry(const char* name, uint16_t qtype, int result, const dmip_addr_t* addrs, uint32_t ttl_sec)
+static cache_entry_t* create_entry(const char* name, uint16_t qtype, int result, const dmip_addr_t* addrs, size_t count, uint32_t ttl_sec)
 {
     cache_entry_t* entry = Dmod_Malloc(sizeof(*entry));
     if (entry == NULL)
         return NULL;
 
-    size_t count = (result > 0) ? (size_t)result : 0u;
+    count = (result == 0) ? count : 0u;
     entry->name       = Dmod_StrDup(name);
     entry->qtype      = qtype;
     entry->result     = result;
-    entry->addrs      = (count > 0u) ? Dmod_Malloc(count * sizeof(dmip_addr_t)) : NULL;
+    entry->addrs      = (count > 0u) ? dmdns_addr_copy(addrs, count) : NULL;
+    entry->count      = count;
     entry->expires_at = dmosi_get_tick_count() + ttl_sec * MS_PER_SEC;
 
     if (entry->name == NULL || (count > 0u && entry->addrs == NULL))
@@ -140,19 +148,17 @@ static cache_entry_t* create_entry(const char* name, uint16_t qtype, int result,
         free_entry(entry);
         return NULL;
     }
-    if (count > 0u)
-        memcpy(entry->addrs, addrs, count * sizeof(dmip_addr_t));
     return entry;
 }
 
-void dmdns_cache_store(const char* name, uint16_t qtype, int result, const dmip_addr_t* addrs, uint32_t ttl_sec)
+void dmdns_cache_store(const char* name, uint16_t qtype, int result, const dmip_addr_t* addrs, size_t count, uint32_t ttl_sec)
 {
     if (ttl_sec > DMDNS_CACHE_MAX_TTL_SEC)
         ttl_sec = DMDNS_CACHE_MAX_TTL_SEC;
-    if (ttl_sec == 0u || result == 0)
+    if (ttl_sec == 0u || (result == 0 && count == 0u))
         return;
 
-    cache_entry_t* entry = create_entry(name, qtype, result, addrs, ttl_sec);
+    cache_entry_t* entry = create_entry(name, qtype, result, addrs, count, ttl_sec);
     if (entry == NULL)
         return;
 

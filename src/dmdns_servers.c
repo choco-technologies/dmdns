@@ -31,11 +31,13 @@
 static dmlist_context_t* g_servers = NULL;
 static dmosi_mutex_t     g_servers_mutex = NULL;
 
+/* The merged list being built - a Dmod_Realloc'd array that grows by one
+ * entry per new server, so nothing is reserved up front. */
 typedef struct
 {
-    dmip_addr_t* out;
-    size_t       max;
+    dmip_addr_t* list;
     size_t       count;
+    int          error;
 } server_set_t;
 
 static int compare_server(const void* entry, const void* key)
@@ -119,18 +121,30 @@ dmod_dmdns_api_declaration(1.0, void, _clear_servers, ( void ))
     dmosi_mutex_unlock(g_servers_mutex);
 }
 
-/* Append `server` unless it is unusable, already in the set, or the set is full. */
-static void add_unique(server_set_t* set, const dmip_addr_t* server)
+/* Append `server` unless it is unusable or already in the set. */
+static int add_unique(server_set_t* set, const dmip_addr_t* server)
 {
-    if (set->count >= set->max || !is_usable_server(server))
-        return;
+    if (!is_usable_server(server))
+        return -EINVAL;
 
     for (size_t i = 0; i < set->count; i++)
     {
-        if (dmdns_addr_equal(&set->out[i], server))
-            return;
+        if (dmdns_addr_equal(&set->list[i], server))
+            return 0;
     }
-    set->out[set->count++] = *server;
+
+    int result = dmdns_addr_append(&set->list, &set->count, server);
+    if (result != 0)
+        set->error = result;
+    return result;
+}
+
+/* dmdns_server_sink_t handed to every provider. */
+static int sink_add(void* sink_ctx, const dmip_addr_t* server)
+{
+    if (sink_ctx == NULL || server == NULL)
+        return -EINVAL;
+    return add_unique((server_set_t*)sink_ctx, server);
 }
 
 static void collect_static(server_set_t* set)
@@ -144,30 +158,35 @@ static void collect_static(server_set_t* set)
 
 static void collect_provided(server_set_t* set)
 {
-    dmip_addr_t provided[DMDNS_MAX_SERVERS];
     Dmod_Context_t* module = Dmod_GetNextDifModule(dmod_dmdns_provide_servers_sig, NULL);
 
-    while (module != NULL && set->count < set->max)
+    while (module != NULL)
     {
         dmod_dmdns_provide_servers_t provide =
             (dmod_dmdns_provide_servers_t)Dmod_GetDifFunction(module, dmod_dmdns_provide_servers_sig);
         if (provide != NULL)
-        {
-            size_t count = provide(provided, DMDNS_MAX_SERVERS);
-            for (size_t i = 0; i < count && i < DMDNS_MAX_SERVERS; i++)
-                add_unique(set, &provided[i]);
-        }
+            provide(sink_add, set);
         module = Dmod_GetNextDifModule(dmod_dmdns_provide_servers_sig, module);
     }
 }
 
-dmod_dmdns_api_declaration(1.0, size_t, _get_servers, ( dmip_addr_t* out, size_t max ))
+dmod_dmdns_api_declaration(1.0, int, _get_servers, ( dmip_addr_t** out_servers, size_t* out_count ))
 {
-    if (out == NULL || max == 0u)
-        return 0;
+    if (out_servers == NULL || out_count == NULL)
+        return -EINVAL;
 
-    server_set_t set = { out, max, 0 };
+    server_set_t set = { NULL, 0, 0 };
     collect_static(&set);
     collect_provided(&set);
-    return set.count;
+
+    if (set.error != 0)
+    {
+        Dmod_Free(set.list);
+        *out_servers = NULL;
+        *out_count = 0;
+        return set.error;
+    }
+    *out_servers = set.list;
+    *out_count = set.count;
+    return 0;
 }

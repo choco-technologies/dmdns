@@ -4,11 +4,9 @@ set(DMOD_MODULE_NAME        nslookup)
 # Author (should be string)
 set(DMOD_AUTHOR_NAME        "Patryk Kubiak")
 
-# Stack size for the module (should be integer) - more than the usual 1024:
-# dmdns_resolve()/_query() run on the calling thread (this one) and keep the
-# query message (DMDNS_MAX_QUERY_LEN bytes) plus server and address arrays
-# on its stack, on top of the whole dmudp -> dmip -> dmnetbridge send path.
-set(DMOD_STACK_SIZE         4096)
+# Stack size for the module (should be integer) - dmdns keeps every message,
+# address list and string on the heap, so the usual 1024 is enough.
+set(DMOD_STACK_SIZE         1024)
 
 # Priority for the thread of the module (should be integer)
 set(DMOD_PRIORITY           0)

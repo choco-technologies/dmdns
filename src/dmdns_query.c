@@ -180,31 +180,33 @@ static void close_query(pending_query_t* query)
     destroy_query(query);
 }
 
-/* Send the question and wait for the answer; parse it into `out`. */
-static int exchange(pending_query_t* query, const char* name, uint16_t qtype, dmip_addr_t* out, size_t max, uint32_t* out_ttl_sec, uint32_t timeout_ms)
+/* Send the question and wait for the answer; parse it into a freshly allocated address array. */
+static int exchange(pending_query_t* query, const char* name, uint16_t qtype, dmip_addr_t** out_addrs, size_t* out_count,
+    uint32_t* out_ttl_sec, uint32_t timeout_ms)
 {
-    uint8_t message[DMDNS_MAX_QUERY_LEN];
+    uint8_t* message = NULL;
     size_t message_len = 0;
-    int result = dmdns_build_query(message, sizeof(message), query->id, name, qtype, &message_len);
+    int result = dmdns_build_query(query->id, name, qtype, &message, &message_len);
     if (result != 0)
         return result;
 
     result = dmudp_send(&query->server, query->port, DMDNS_PORT, message, message_len, timeout_ms);
+    Dmod_Free(message);
     if (result != 0)
         return result;
     if (dmosi_semaphore_wait(query->answered, 1, (int32_t)timeout_ms) != 0)
         return -ETIMEDOUT;
 
-    size_t count = 0;
-    result = dmdns_parse_response(query->response, query->response_len, query->id, name, qtype, out, max, &count, out_ttl_sec);
-    return (result == 0) ? (int)count : result;
+    return dmdns_parse_response(query->response, query->response_len, query->id, name, qtype, out_addrs, out_count, out_ttl_sec);
 }
 
 dmod_dmdns_api_declaration(1.0, int, _query, ( const dmip_addr_t* server, const char* name, uint16_t qtype,
-    dmip_addr_t* out, size_t max, uint32_t* out_ttl_sec, uint32_t timeout_ms ))
+    dmip_addr_t** out_addrs, size_t* out_count, uint32_t* out_ttl_sec, uint32_t timeout_ms ))
 {
-    if (server == NULL || out == NULL || max == 0u || !dmdns_is_valid_name(name))
+    if (server == NULL || out_addrs == NULL || out_count == NULL || !dmdns_is_valid_name(name))
         return -EINVAL;
+    *out_addrs = NULL;
+    *out_count = 0;
     if (server->family != dmip_family_v4 && server->family != dmip_family_v6)
         return -EINVAL;
     if (timeout_ms == 0u)
@@ -215,7 +217,7 @@ dmod_dmdns_api_declaration(1.0, int, _query, ( const dmip_addr_t* server, const 
     if (result != 0)
         return result;
 
-    result = exchange(query, name, qtype, out, max, out_ttl_sec, timeout_ms);
+    result = exchange(query, name, qtype, out_addrs, out_count, out_ttl_sec, timeout_ms);
     close_query(query);
     return result;
 }

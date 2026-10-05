@@ -26,12 +26,10 @@ extern "C" {
  * what it reports through this Built-in API.
  */
 
-/** @brief Most servers the fixture can be told to report */
-#define DMDNS_TEST_PROVIDER_MAX_SERVERS 4u
-
 /**
  * @brief Set what the fixture's dmdns_provide_servers() reports from now
- *        on - `count` 0 (or `servers` NULL) makes it report nothing
+ *        on (a heap copy is kept) - `count` 0 (or `servers` NULL) makes it
+ *        report nothing
  */
 dmod_dmdns_test_provider_api(1.0, void, _set, ( const dmip_addr_t* servers, size_t count ));
 

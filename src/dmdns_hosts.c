@@ -124,39 +124,50 @@ dmod_dmdns_api_declaration(1.0, int, _remove_host, ( const char* name ))
     return (removed > 0u) ? 0 : -ENOENT;
 }
 
-static size_t lookup_localhost(uint16_t qtype, dmip_addr_t* out)
+static int lookup_localhost(uint16_t qtype, dmip_addr_t** out_addrs, size_t* out_count)
 {
-    memset(out, 0, sizeof(*out));
+    dmip_addr_t addr = { 0 };
     if (qtype == DMDNS_TYPE_A)
     {
-        out->family = dmip_family_v4;
-        out->addr.v4[0] = 127;
-        out->addr.v4[3] = 1;
+        addr.family = dmip_family_v4;
+        addr.addr.v4[0] = 127;
+        addr.addr.v4[3] = 1;
     }
     else
     {
-        out->family = dmip_family_v6;
-        out->addr.v6[DMIP_IPV6_ADDR_LEN - 1u] = 1;
+        addr.family = dmip_family_v6;
+        addr.addr.v6[DMIP_IPV6_ADDR_LEN - 1u] = 1;
     }
-    return 1;
+
+    *out_addrs = dmdns_addr_copy(&addr, 1u);
+    *out_count = (*out_addrs != NULL) ? 1u : 0u;
+    return (*out_addrs != NULL) ? 0 : -ENOMEM;
 }
 
-size_t dmdns_hosts_lookup(const char* name, uint16_t qtype, dmip_addr_t* out, size_t max)
+int dmdns_hosts_lookup(const char* name, uint16_t qtype, dmip_addr_t** out_addrs, size_t* out_count)
 {
-    if (max == 0u)
-        return 0;
+    *out_addrs = NULL;
+    *out_count = 0;
     if (dmdns_name_equal(name, LOCALHOST_NAME))
-        return lookup_localhost(qtype, out);
+        return lookup_localhost(qtype, out_addrs, out_count);
 
-    size_t count = 0;
+    int result = 0;
     dmosi_mutex_lock(g_hosts_mutex);
     size_t size = dmlist_size(g_hosts);
-    for (size_t i = 0; i < size && count < max; i++)
+    for (size_t i = 0; i < size && result == 0; i++)
     {
         host_entry_t* entry = dmlist_get(g_hosts, i);
         if (dmdns_family_to_qtype(entry->addr.family) == qtype && dmdns_name_equal(entry->name, name))
-            out[count++] = entry->addr;
+            result = dmdns_addr_append(out_addrs, out_count, &entry->addr);
     }
     dmosi_mutex_unlock(g_hosts_mutex);
-    return count;
+
+    if (result != 0)
+    {
+        Dmod_Free(*out_addrs);
+        *out_addrs = NULL;
+        *out_count = 0;
+        return result;
+    }
+    return (*out_count > 0u) ? 0 : -ENOENT;
 }

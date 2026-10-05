@@ -56,10 +56,17 @@ extern "C" {
  * callback - or they will always time out. All other functions are
  * non-blocking and thread-safe.
  *
+ * Memory
+ * ------
+ * Nothing is reserved up front: every message, address list, server list
+ * and string is allocated with Dmod_Malloc() at exactly the size it needs
+ * once that size is known. Functions returning such a result say so - the
+ * caller releases it with Dmod_Free().
+ *
  * Limits
  * ------
- * Plain UDP DNS only (no TCP fallback, no EDNS0, no DNSSEC): messages are
- * limited to DMDNS_MAX_MESSAGE_LEN bytes. A truncated answer (TC bit) is
+ * Plain UDP DNS only (no TCP fallback, no EDNS0, no DNSSEC): a server
+ * answers with at most 512 bytes (RFC 1035 4.2.1). A truncated answer (TC bit) is
  * still used if it carries at least one address. IPv6 (AAAA) records can
  * be looked up, but the question itself is sent to an IPv4 server only
  * until dmudp_send() gains an IPv6 path.
@@ -72,20 +79,19 @@ extern "C" {
 /** @brief UDP port name servers listen on */
 #define DMDNS_PORT                53u
 
-/** @brief Longest host name in presentation form, without the trailing dot (RFC 1035 2.3.4) */
+/**
+ * @brief Longest valid host name, without the trailing dot (RFC 1035 2.3.4)
+ *
+ * A protocol limit checked by dmdns_is_valid_name() - no buffer is ever
+ * sized from it.
+ */
 #define DMDNS_MAX_NAME_LEN        253u
 
-/** @brief Longest single label (RFC 1035 2.3.4) */
+/** @brief Longest valid label (RFC 1035 2.3.4) - checked by dmdns_is_valid_name() */
 #define DMDNS_MAX_LABEL_LEN       63u
 
 /** @brief Length of the fixed DNS message header (RFC 1035 4.1.1) */
 #define DMDNS_HEADER_LEN          12u
-
-/** @brief Largest message carried over plain UDP (RFC 1035 4.2.1) */
-#define DMDNS_MAX_MESSAGE_LEN     512u
-
-/** @brief Largest query dmdns_build_query() can produce: header + encoded name + QTYPE + QCLASS */
-#define DMDNS_MAX_QUERY_LEN       (DMDNS_HEADER_LEN + DMDNS_MAX_NAME_LEN + 2u + 4u)
 
 /** @brief Resource record types (RFC 1035 3.2.2, RFC 3596) */
 #define DMDNS_TYPE_A              1u
@@ -101,12 +107,6 @@ extern "C" {
 /** @brief How many times dmdns_resolve() walks the whole server list before giving up */
 #define DMDNS_ATTEMPTS            2u
 
-/** @brief Most name servers dmdns_get_servers() reports (static + every provider) */
-#define DMDNS_MAX_SERVERS         8u
-
-/** @brief Most addresses kept per name - in the cache and in one dmdns_query() answer */
-#define DMDNS_MAX_ADDRESSES       8u
-
 /** @brief Most names kept in the answer cache - the oldest entry is evicted first */
 #define DMDNS_CACHE_MAX_ENTRIES   16u
 
@@ -115,9 +115,6 @@ extern "C" {
 
 /** @brief How long a "no such name" / "no such record" answer is cached (RFC 2308, simplified) */
 #define DMDNS_NEGATIVE_TTL_SEC    30u
-
-/** @brief Buffer size big enough for dmdns_format_address() of any address, NUL included */
-#define DMDNS_ADDRESS_STRLEN      46u
 
 /* ============================================================================
  *                                  Codec
@@ -135,17 +132,17 @@ dmod_dmdns_api(1.0, bool, _is_valid_name, ( const char* name ));
 /**
  * @brief Build a standard recursive query (RD set) for one question
  *
- * @param buffer     Output buffer, DMDNS_MAX_QUERY_LEN bytes is always enough
- * @param buffer_len Size of `buffer`
- * @param id         Transaction ID to put in the header
- * @param name       Host name to ask about (see dmdns_is_valid_name())
- * @param qtype      DMDNS_TYPE_A or DMDNS_TYPE_AAAA (any type is encoded as given)
- * @param out_len    Output: number of bytes written
+ * @param id          Transaction ID to put in the header
+ * @param name        Host name to ask about (see dmdns_is_valid_name())
+ * @param qtype       DMDNS_TYPE_A or DMDNS_TYPE_AAAA (any type is encoded as given)
+ * @param out_message Output: the message, allocated at exactly its size -
+ *                     release with Dmod_Free()
+ * @param out_len     Output: its length in bytes
  *
  * @return 0 on success, -EINVAL on a NULL argument or invalid name,
- *         -ENOBUFS if `buffer` is too small
+ *         -ENOMEM on allocation failure
  */
-dmod_dmdns_api(1.0, int, _build_query, ( uint8_t* buffer, size_t buffer_len, uint16_t id, const char* name, uint16_t qtype, size_t* out_len ));
+dmod_dmdns_api(1.0, int, _build_query, ( uint16_t id, const char* name, uint16_t qtype, uint8_t** out_message, size_t* out_len ));
 
 /**
  * @brief Parse the answer to a query built by dmdns_build_query()
@@ -163,9 +160,10 @@ dmod_dmdns_api(1.0, int, _build_query, ( uint8_t* buffer, size_t buffer_len, uin
  * @param id          Transaction ID the query was sent with
  * @param name        Name the query asked about
  * @param qtype       Type the query asked about (DMDNS_TYPE_A/_AAAA)
- * @param out         Output: addresses found, may be NULL if `max` is 0
- * @param max         Capacity of `out`
- * @param out_count   Output: number of addresses written to `out`
+ * @param out_addrs   Output: every address found, allocated at exactly
+ *                     `*out_count` entries - release with Dmod_Free().
+ *                     Set to NULL on any error.
+ * @param out_count   Output: number of addresses
  * @param out_ttl_sec Output (may be NULL): smallest TTL among them, or
  *                     DMDNS_NEGATIVE_TTL_SEC for a negative answer
  *
@@ -178,10 +176,11 @@ dmod_dmdns_api(1.0, int, _build_query, ( uint8_t* buffer, size_t buffer_len, uin
  *         -EPROTO       malformed message, wrong ID, question mismatch
  *                       or FORMERR,
  *         -EIO          any other server error (NOTIMP, ...),
+ *         -ENOMEM       allocation failure,
  *         -EINVAL       a NULL argument
  */
 dmod_dmdns_api(1.0, int, _parse_response, ( const uint8_t* message, size_t length, uint16_t id, const char* name, uint16_t qtype,
-    dmip_addr_t* out, size_t max, size_t* out_count, uint32_t* out_ttl_sec ));
+    dmip_addr_t** out_addrs, size_t* out_count, uint32_t* out_ttl_sec ));
 
 /* ============================================================================
  *                              Address literals
@@ -199,18 +198,27 @@ dmod_dmdns_api(1.0, int, _parse_address, ( const char* text, dmip_addr_t* out ))
  * @brief Format an address as text - dotted decimal for IPv4, the RFC 5952
  *        canonical form ("2001:db8::1") for IPv6
  *
- * @param addr       Address to format
- * @param buffer     Output buffer, DMDNS_ADDRESS_STRLEN bytes is always enough
- * @param buffer_len Size of `buffer`
- *
- * @return 0 on success, -EINVAL on a NULL argument or unknown family,
- *         -ENOBUFS if `buffer` is too small
+ * @return The text, allocated at exactly its length + 1 - release with
+ *         Dmod_Free() - or NULL on a NULL/family-less address or
+ *         allocation failure
  */
-dmod_dmdns_api(1.0, int, _format_address, ( const dmip_addr_t* addr, char* buffer, size_t buffer_len ));
+dmod_dmdns_api(1.0, char*, _address_to_string, ( const dmip_addr_t* addr ));
 
 /* ============================================================================
  *                                Name servers
  * ========================================================================== */
+
+/**
+ * @brief Callback a dmdns_provide_servers implementation calls once per
+ *        name server it knows
+ *
+ * @param sink_ctx As passed to dmdns_provide_servers()
+ * @param server   One server address (copied - need not outlive the call)
+ *
+ * @return 0, or a negative errno (e.g. -ENOMEM) - a provider may stop
+ *         reporting on an error but does not have to
+ */
+typedef int (*dmdns_server_sink_t)( void* sink_ctx, const dmip_addr_t* server );
 
 /**
  * @brief DIF implemented by a module that knows name servers - e.g. a DHCP
@@ -218,15 +226,15 @@ dmod_dmdns_api(1.0, int, _format_address, ( const dmip_addr_t* addr, char* buffe
  *
  * Asked fresh on every dmdns_get_servers() call (so on every resolution
  * that goes to the network), never cached: report what is valid right now,
- * or nothing. Called from the resolving thread, never from a receive
- * callback, so the implementation may take its own locks.
+ * or nothing. Call `add` once per server - there is no limit on how many.
+ * Called from the resolving thread, never from a receive callback, so the
+ * implementation may take its own locks (but must not call back into
+ * dmdns_get_servers()).
  *
- * @param out_servers Output: up to `max_servers` server addresses
- * @param max_servers Capacity of `out_servers`
- *
- * @return Number of addresses written to `out_servers`
+ * @param add      Callback to report one server with
+ * @param sink_ctx Opaque context to pass back to `add`
  */
-dmod_dmdns_dif(1.0, size_t, _provide_servers, ( dmip_addr_t* out_servers, size_t max_servers ));
+dmod_dmdns_dif(1.0, void, _provide_servers, ( dmdns_server_sink_t add, void* sink_ctx ));
 
 /**
  * @brief Add a static name server, asked before any provided by the DIF
@@ -246,12 +254,13 @@ dmod_dmdns_api(1.0, void, _clear_servers, ( void ));
  * @brief The name servers dmdns_resolve() would ask right now, in order:
  *        static servers first, then every DIF provider's, duplicates removed
  *
- * @param out Output array, may be NULL if `max` is 0
- * @param max Capacity of `out` - DMDNS_MAX_SERVERS covers every case
+ * @param out_servers Output: the servers, allocated at exactly `*out_count`
+ *                     entries - release with Dmod_Free(); NULL if there are none
+ * @param out_count   Output: number of servers
  *
- * @return Number of addresses written to `out`
+ * @return 0 on success, -EINVAL on a NULL argument, -ENOMEM on allocation failure
  */
-dmod_dmdns_api(1.0, size_t, _get_servers, ( dmip_addr_t* out, size_t max ));
+dmod_dmdns_api(1.0, int, _get_servers, ( dmip_addr_t** out_servers, size_t* out_count ));
 
 /* ============================================================================
  *                                Hosts table
@@ -292,19 +301,19 @@ dmod_dmdns_api(1.0, void, _flush_cache, ( void ));
  * @param server      Name server to ask
  * @param name        Host name to look up
  * @param qtype       DMDNS_TYPE_A or DMDNS_TYPE_AAAA
- * @param out         Output: addresses found
- * @param max         Capacity of `out`, must be > 0
+ * @param out_addrs   Output: every address in the answer, allocated at
+ *                     exactly `*out_count` entries - release with Dmod_Free()
+ * @param out_count   Output: number of addresses
  * @param out_ttl_sec Output (may be NULL): TTL of the answer
  * @param timeout_ms  How long to wait for the answer, 0 = DMDNS_DEFAULT_TIMEOUT_MS
  *
- * @return Number of addresses written to `out` (> 0) on success,
- *         -ETIMEDOUT if no answer arrived in time, any error of
- *         dmdns_parse_response() for a negative/bad answer, or the error of
- *         dmudp_bind_any()/dmudp_send() (e.g. -ENETUNREACH) if the query
+ * @return 0 on success, -ETIMEDOUT if no answer arrived in time, any error
+ *         of dmdns_parse_response() for a negative/bad answer, or the error
+ *         of dmudp_bind_any()/dmudp_send() (e.g. -ENETUNREACH) if the query
  *         could not be sent at all
  */
 dmod_dmdns_api(1.0, int, _query, ( const dmip_addr_t* server, const char* name, uint16_t qtype,
-    dmip_addr_t* out, size_t max, uint32_t* out_ttl_sec, uint32_t timeout_ms ));
+    dmip_addr_t** out_addrs, size_t* out_count, uint32_t* out_ttl_sec, uint32_t timeout_ms ));
 
 /**
  * @brief Resolve a host name to addresses - the gethostbyname() of dmod
@@ -322,18 +331,20 @@ dmod_dmdns_api(1.0, int, _query, ( const dmip_addr_t* server, const char* name, 
  * @param family     dmip_family_v4 (A), dmip_family_v6 (AAAA) or
  *                    dmip_family_none for "any": A first, AAAA if the name
  *                    has no A record
- * @param out        Output: addresses
- * @param max        Capacity of `out`, must be > 0
+ * @param out_addrs  Output: the addresses, allocated at exactly `*out_count`
+ *                    entries - release with Dmod_Free(); NULL on error
+ * @param out_count  Output: number of addresses (> 0 on success)
  * @param timeout_ms Wait per server attempt, 0 = DMDNS_DEFAULT_TIMEOUT_MS
  *
- * @return Number of addresses written to `out` (> 0) on success, or
+ * @return 0 on success, or
  *         -EINVAL        invalid name/argument,
  *         -ENOENT        no such name,
  *         -ENODATA       the name has no address of the requested family,
  *         -EDESTADDRREQ  no name server is configured,
+ *         -ENOMEM        allocation failure,
  *         otherwise the last error dmdns_query() returned (-ETIMEDOUT, ...)
  */
-dmod_dmdns_api(1.0, int, _resolve, ( const char* name, dmip_family_t family, dmip_addr_t* out, size_t max, uint32_t timeout_ms ));
+dmod_dmdns_api(1.0, int, _resolve, ( const char* name, dmip_family_t family, dmip_addr_t** out_addrs, size_t* out_count, uint32_t timeout_ms ));
 
 #ifdef __cplusplus
 }

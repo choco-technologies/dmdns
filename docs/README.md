@@ -15,13 +15,14 @@ DMOD network stack.
 ```c
 #include "dmdns.h"
 
-dmip_addr_t addr;
-int count = dmdns_resolve("google.com", dmip_family_v4, &addr, 1, 0);
-if (count > 0)
+dmip_addr_t* addrs = NULL;
+size_t count = 0;
+if (dmdns_resolve("google.com", dmip_family_v4, &addrs, &count, 0) == 0)
 {
-    char text[DMDNS_ADDRESS_STRLEN];
-    dmdns_format_address(&addr, text, sizeof(text));
+    char* text = dmdns_address_to_string(&addrs[0]);
     Dmod_Printf("google.com is %s\n", text);
+    Dmod_Free(text);
+    Dmod_Free(addrs);
 }
 ```
 
