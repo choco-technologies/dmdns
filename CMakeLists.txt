@@ -27,7 +27,7 @@ set(DMOD_BUILD_TEMPLATES OFF CACHE BOOL "Build templates")
 FetchContent_MakeAvailable(dmod)
 
 project(dmdns VERSION ${DMOD_MODULE_VERSION}
-    DESCRIPTION "dmdns DMOD library module"
+    DESCRIPTION "dmdns - DNS stub resolver DMOD library module"
     LANGUAGES C CXX)
 
 set(DMOD_DIR ${dmod_SOURCE_DIR} CACHE PATH "DMOD source directory")
@@ -62,6 +62,13 @@ set(DMOD_DIF_IMPLS          )
 dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     # List of source files - can include C and C++ files
     src/dmdns.c
+    src/dmdns_registrations.c
+    src/dmdns_codec.c
+    src/dmdns_address.c
+    src/dmdns_servers.c
+    src/dmdns_hosts.c
+    src/dmdns_cache.c
+    src/dmdns_query.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
@@ -72,9 +79,32 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# To depend on another module's headers, use:
-#   dmod_link_modules(${DMOD_MODULE_NAME}
-#       other_module@1.0
-#   )
+# dmudp:   dmudp_bind_any()/_unbind() and dmudp_send() - one ephemeral port
+#          per in-flight query (see src/dmdns_query.c).
+# dmip:    dmip_addr_t/dmip_family_t, the address type of the whole API
+#          (dmdns.h #includes dmip.h directly).
+# dmroute: dmip.h needs dmroute_addr_t (re-exported as dmip_addr_t)
+#          directly - header-only.
+# dmnetif: dmudp.h/dmip.h need dmnetif_iface_t (the receive handler's
+#          `iface` parameter) - header-only.
+# dmlist:  server list, hosts table, answer cache, pending-query table.
+# dmosi:   mutexes guarding those, the per-query semaphore the asking
+#          thread waits on, dmosi_get_tick_count() for cache expiry.
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmudp
+    dmip
+    dmroute
+    dmnetif
+    dmlist
+    dmosi
+)
+
 enable_testing()
 add_subdirectory(tests)
+
+# Application-type DMOD modules built as CLI tools around dmdns's API.
+# Added after the dmdns target itself so its dmdns_if interface target
+# exists - tools/nslookup links it directly, the same way tests/CMakeLists.txt
+# does, instead of fetching dmdns's own published headers back via
+# dmod_link_modules() as if it were an external module.
+add_subdirectory(tools)

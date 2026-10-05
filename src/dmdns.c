@@ -1,84 +1,142 @@
-#define DMOD_ENABLE_REGISTRATION ON
+/**
+ * @file dmdns.c
+ * @brief DMOD lifecycle (dmod_init()/_deinit()) and dmdns_resolve()
+ *
+ * dmdns_resolve() only orchestrates - every step it takes lives in its own
+ * file (see dmdns_internal.h's file map). dmod_init() binds no UDP port:
+ * each dmdns_query() binds its own ephemeral one for as long as it runs,
+ * so a loaded-but-idle dmdns costs nothing but its (empty) tables.
+ */
 #include "dmod.h"
-#include "dmdns.h"
+#include "dmdns_internal.h"
+#include <string.h>
+#include <errno.h>
 
-/* Example internal state - replace with your module's real fields. */
-struct dmdns
-{
-    bool valid;
-};
+/* Record types tried, in order, for dmip_family_none ("any address"). */
+static const uint16_t g_any_qtypes[] = { DMDNS_TYPE_A, DMDNS_TYPE_AAAA };
 
-dmod_dmdns_api_declaration(1.0, dmdns_t, _create, ( void ))
+static bool is_definitive(int result)
 {
-    /* Dmod_Malloc/Dmod_Free (SAL) are dmod's own heap functions - embedded
-     * targets don't necessarily link a libc allocator, so use these instead
-     * of malloc()/free() in module code. */
-    struct dmdns *instance = Dmod_Malloc(sizeof(*instance));
-    if (instance == NULL)
+    return result > 0 || result == -ENOENT || result == -ENODATA;
+}
+
+/* An IP literal resolves to itself - no lookup. Returns 0 if `name` is not a literal. */
+static int resolve_literal(const char* name, dmip_family_t family, dmip_addr_t* out)
+{
+    dmip_addr_t addr;
+    if (dmdns_parse_address(name, &addr) != 0)
+        return 0;
+    if (family != dmip_family_none && family != addr.family)
+        return -ENODATA;
+
+    *out = addr;
+    return 1;
+}
+
+/* A definitive answer is cached in full (up to DMDNS_MAX_ADDRESSES), then cut down to the caller's `max`. */
+static int deliver_answer(const char* name, uint16_t qtype, int result, const dmip_addr_t* found, uint32_t ttl_sec, dmip_addr_t* out, size_t max)
+{
+    dmdns_cache_store(name, qtype, result, found, ttl_sec);
+    if (result <= 0)
+        return result;
+
+    size_t count = ((size_t)result < max) ? (size_t)result : max;
+    memcpy(out, found, count * sizeof(dmip_addr_t));
+    return (int)count;
+}
+
+/* Walk every name server DMDNS_ATTEMPTS times until one gives a definitive answer. */
+static int ask_servers(const char* name, uint16_t qtype, dmip_addr_t* out, size_t max, uint32_t timeout_ms)
+{
+    dmip_addr_t servers[DMDNS_MAX_SERVERS];
+    dmip_addr_t found[DMDNS_MAX_ADDRESSES];
+    size_t server_count = dmdns_get_servers(servers, DMDNS_MAX_SERVERS);
+    if (server_count == 0u)
+        return -EDESTADDRREQ;
+
+    int result = -ETIMEDOUT;
+    for (size_t attempt = 0; attempt < DMDNS_ATTEMPTS; attempt++)
     {
-        return NULL;
+        for (size_t i = 0; i < server_count; i++)
+        {
+            uint32_t ttl_sec = 0;
+            result = dmdns_query(&servers[i], name, qtype, found, DMDNS_MAX_ADDRESSES, &ttl_sec, timeout_ms);
+            if (is_definitive(result))
+                return deliver_answer(name, qtype, result, found, ttl_sec, out, max);
+        }
+    }
+    return result;
+}
+
+static int resolve_remote(const char* name, uint16_t qtype, dmip_addr_t* out, size_t max, uint32_t timeout_ms)
+{
+    int result = dmdns_cache_lookup(name, qtype, out, max);
+    if (result != 0)
+        return result;
+    return ask_servers(name, qtype, out, max, timeout_ms);
+}
+
+static int resolve_name(const char* name, const uint16_t* qtypes, size_t qtype_count, dmip_addr_t* out, size_t max, uint32_t timeout_ms)
+{
+    for (size_t i = 0; i < qtype_count; i++)
+    {
+        size_t count = dmdns_hosts_lookup(name, qtypes[i], out, max);
+        if (count > 0u)
+            return (int)count;
     }
 
-    instance->valid = true;
-    return instance;
+    int result = -ENODATA;
+    for (size_t i = 0; i < qtype_count && result == -ENODATA; i++)
+        result = resolve_remote(name, qtypes[i], out, max, timeout_ms);
+    return result;
 }
 
-dmod_dmdns_api_declaration(1.0, void, _destroy, ( dmdns_t handle ))
+dmod_dmdns_api_declaration(1.0, int, _resolve, ( const char* name, dmip_family_t family, dmip_addr_t* out, size_t max, uint32_t timeout_ms ))
 {
-    Dmod_Free(handle);
+    if (name == NULL || out == NULL || max == 0u)
+        return -EINVAL;
+    if (family != dmip_family_none && dmdns_family_to_qtype(family) == 0u)
+        return -EINVAL;
+
+    int result = resolve_literal(name, family, out);
+    if (result != 0)
+        return result;
+    if (!dmdns_is_valid_name(name))
+        return -EINVAL;
+
+    if (family == dmip_family_none)
+        return resolve_name(name, g_any_qtypes, sizeof(g_any_qtypes) / sizeof(g_any_qtypes[0]), out, max, timeout_ms);
+
+    uint16_t qtype = dmdns_family_to_qtype(family);
+    return resolve_name(name, &qtype, 1u, out, max, timeout_ms);
 }
 
-dmod_dmdns_api_declaration(1.0, bool, _is_valid, ( dmdns_t handle ))
+static void deinit_all(void)
 {
-    return handle != NULL && handle->valid;
+    dmdns_query_deinit();
+    dmdns_cache_deinit();
+    dmdns_hosts_deinit();
+    dmdns_servers_deinit();
 }
 
-/**
- * @brief Pre-initialization function for the module.
- *
- * @note This function is optional. You can remove it if you don't need it.
- *
- * This function is called when the module enabling is in progress.
- *
- * You can use this function to load the required dependencies, such as
- * other modules. Please be aware that the module is not fully initialized,
- * so not all the API functions are available - you can check if the API
- * is connected by calling the Dmod_IsFunctionConnected() function.
- */
-void dmod_preinit(void)
-{
-    if(Dmod_IsFunctionConnected( Dmod_Printf ))
-    {
-        Dmod_Printf("API is connected!\n");
-    }
-}
-
-/**
- * @brief Initialization function for the module.
- *
- * This function is called when the module is enabled.
- * Please use this function to initialize the module, for instance:
- * - initialize the module variables
- * - initialize the module hardware
- * - allocate memory
- */
 int dmod_init(const Dmod_Config_t *Config)
 {
-    Dmod_Printf("Hello, World!\n");
+    (void)Config;
+
+    if (dmdns_servers_init() != 0 || dmdns_hosts_init() != 0 || dmdns_cache_init() != 0 || dmdns_query_init() != 0)
+    {
+        DMOD_LOG_ERROR("Failed to allocate dmdns state\n");
+        deinit_all();
+        return -1;
+    }
+
+    DMOD_LOG_INFO("DMDNS initialized\n");
     return 0;
 }
 
-/**
- * @brief De-initialization function for the module.
- *
- * This function is called when the module is disabled.
- * Please use this function to de-initialize the module, for instance:
- * - free memory
- * - de-initialize the module hardware
- * - de-initialize the module variables
- */
 int dmod_deinit(void)
 {
-    Dmod_Printf("Goodbye, World!\n");
+    deinit_all();
+    DMOD_LOG_INFO("DMDNS deinitialized\n");
     return 0;
 }
