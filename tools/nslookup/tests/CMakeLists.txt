@@ -1,36 +1,25 @@
-# A Library-type fixture implementing the dmdns_provide_servers DIF - see
-# fixtures/dmdns_test_provider/include/dmdns_test_provider.h.
-add_subdirectory(fixtures/dmdns_test_provider)
-
-set(DMOD_MODULE_NAME        test_dmdns)
+set(DMOD_MODULE_NAME        test_nslookup)
 set(DMOD_MODULE_VERSION     ${PROJECT_VERSION})
 set(DMOD_AUTHOR_NAME        "Patryk Kubiak")
 set(DMOD_STACK_SIZE         1024)
 set(DMOD_PRIORITY           0)
 
 dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
-    dmdns_test.c
+    nslookup_test.c
 )
 
-target_include_directories(${DMOD_MODULE_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../include
-)
+# dmdns: dmdns_add_host() to seed a name nslookup can find without a
+#        network - and, as a loaded dependency, the library nslookup's own
+#        calls resolve against while Dmod_RunModule() runs it.
+target_link_libraries(${DMOD_MODULE_NAME} dmdns_if)
 
-target_link_libraries(${DMOD_MODULE_NAME} dmdns_if dmdns_test_provider_if)
-
-# dmip/dmroute/dmnetif: the header chain dmdns.h pulls in (dmip_addr_t is
-# dmroute_addr_t, dmip.h needs dmnetif_iface_t) - dmdns_if alone doesn't
-# carry their include dirs.
+# dmip/dmroute/dmnetif: the header chain dmdns.h pulls in.
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmip
     dmroute
     dmnetif
 )
 
-# Register the test module with ctest - this replays the same two steps CI
-# runs (see .github/templates/ci.yml.template): install the test module's
-# dependencies with dmf-get, then execute it through dmod_loader. The test's
-# exit code equals its number of failed steps (see dmod_add_test).
 find_program(DMF_GET_EXECUTABLE dmf-get HINTS ${DMOD_TOOLS_BIN_DIR} PATHS ENV PATH)
 find_program(DMOD_LOADER_EXECUTABLE dmod_loader HINTS ${DMOD_TOOLS_BIN_DIR} PATHS ENV PATH)
 

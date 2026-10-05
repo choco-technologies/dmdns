@@ -33,6 +33,8 @@ jobs:
           test -f build/dmf/dmdns.dmf
           test -f build/dmf/dmdns_version.txt
           test -f build/dmf/test_dmdns.dmf
+          test -f build/dmf/nslookup.dmf
+          test -f build/dmf/test_nslookup.dmf
           echo "Module files present"
 
       - name: Run tests with dmod_loader
@@ -40,3 +42,9 @@ jobs:
           export DMOD_DMF_DIR=$(pwd)/build/dmf
           dmf-get install -d ${DMOD_DMF_DIR}/test_dmdns-local.dmd -y
           dmod_loader build/dmf/test_dmdns.dmf
+
+      - name: Run nslookup tests with dmod_loader
+        run: |
+          export DMOD_DMF_DIR=$(pwd)/build/dmf
+          dmf-get install -d ${DMOD_DMF_DIR}/test_nslookup-local.dmd -y
+          dmod_loader build/dmf/test_nslookup.dmf

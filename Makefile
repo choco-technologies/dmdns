@@ -24,7 +24,8 @@ DMOD_MODULE_VERSION=0.1
 DMOD_AUTHOR_NAME=Patryk Kubiak
 
 # The list of C sources
-DMOD_CSOURCES=src/dmdns.c
+DMOD_CSOURCES=src/dmdns.c src/dmdns_registrations.c src/dmdns_codec.c src/dmdns_address.c \
+               src/dmdns_servers.c src/dmdns_hosts.c src/dmdns_cache.c src/dmdns_query.c
 
 # The list of C++ sources
 DMOD_CXXSOURCES=
