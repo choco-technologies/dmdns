@@ -1,5 +1,11 @@
 # Include dynamically generated versions list from latest release
 $include https://github.com/choco-technologies/dmdns/releases/download/vlatest/versions.dmm
 
-# Module entry with version placeholder - expanded by $version-available
-dmdns https://github.com/choco-technologies/dmdns/releases/download/v<version>/dmdns-v<version>-<arch_name>.zip
+# Module entries with version placeholder - expanded by $version-available.
+# Besides the dmdns module itself this repo releases the `nslookup` CLI from
+# tools/, plus each one's test module - all packaged per full architecture
+# (<arch_name>), since none of them are hardware ports.
+dmdns         https://github.com/choco-technologies/dmdns/releases/download/v<version>/dmdns-v<version>-<arch_name>.zip
+test_dmdns    https://github.com/choco-technologies/dmdns/releases/download/v<version>/test_dmdns-v<version>-<arch_name>.zip
+nslookup      https://github.com/choco-technologies/dmdns/releases/download/v<version>/nslookup-v<version>-<arch_name>.zip
+test_nslookup https://github.com/choco-technologies/dmdns/releases/download/v<version>/test_nslookup-v<version>-<arch_name>.zip
