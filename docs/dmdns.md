@@ -36,6 +36,15 @@ and far more RAM than any board in this tree has to spare.
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
+## Who loads it
+
+dmdns is a Library module, enabled once for the whole system by the
+`dns` dmsystem unit ([`configs/dns.ini`](../configs/dns.ini), `type=library`).
+Its server list, hosts table and cache live from boot until `service stop
+dns`. Modules that link it (e.g. `nslookup`) would also load it as a
+dependency if the unit is not used. There is no per-interface instance:
+see [service.md](service.md#one-unit-no-device-rules).
+
 ## Layers
 
 The module is split so that every layer can be used - and tested - on its

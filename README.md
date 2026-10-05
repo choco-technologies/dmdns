@@ -153,12 +153,28 @@ See [include/dmdns.h](include/dmdns.h) for the full
 declarations and [docs/api-reference.md](docs/api-reference.md) for the
 complete reference.
 
+## Running as a service
+
+dmdns is a Library module, so something has to load and enable it.
+**[configs/dns.ini](configs/dns.ini)** is a `dmsystem` unit (`type=library`)
+that brings the resolver up at boot. Use `service start dns` /
+`service stop dns` to control it. There is one unit for the whole system
+and no per-interface rules: servers offered on each interface reach dmdns
+through the `dmdns_provide_servers` DIF at lookup time. With dmod-boot:
+
+```
+dmdns service=dns.ini
+```
+
+See [docs/service.md](docs/service.md) for details.
+
 ## Documentation
 
 See the `docs/` directory:
 
 - **[dmdns.md](docs/dmdns.md)** - Architecture and design rationale
 - **[api-reference.md](docs/api-reference.md)** - Complete API documentation
+- **[service.md](docs/service.md)** - Running the resolver as a `dmsystem` service
 
 View documentation using `dmf-man dmdns`.
 
@@ -166,6 +182,8 @@ View documentation using `dmf-man dmdns`.
 
 ```
 dmdns/
+├── configs/
+│   └── dns.ini                  # dmsystem unit (type=library)
 ├── docs/                        # Documentation (markdown format)
 ├── include/
 │   └── dmdns.h                  # Public API

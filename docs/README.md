@@ -9,6 +9,7 @@ DMOD network stack.
   where name servers come from (the `dmdns_provide_servers` DIF), how a
   query works, cache, limits
 - **[api-reference.md](api-reference.md)** - Complete API documentation
+- **[service.md](service.md)** - Running the resolver as a `dmsystem` service (`configs/dns.ini`)
 
 ## Quick Reference
 
